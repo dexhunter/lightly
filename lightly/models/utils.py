@@ -1028,6 +1028,12 @@ def random_block_mask_image(
 
     H, W = size
     mask = torch.zeros((H, W), dtype=torch.bool, device=device)
+    H, W = mask.shape
+    mask_bits = 0
+    # row_repeats[h] repeats a row every W bits in the flattened mask.
+    row_repeats = [0]
+    for _ in range(H - 1):
+        row_repeats.append((row_repeats[-1] << W) | 1)
     mask_count = 0
     while mask_count < num_masks:
         # Try masking a block
@@ -1041,10 +1047,17 @@ def random_block_mask_image(
             if w < W and h < H:
                 top = random.randint(0, H - h)
                 left = random.randint(0, W - w)
-                num_already_masked = mask[top : top + h, left : left + w].sum().item()
-                num_new_masked = h * w - num_already_masked
+                # Preserve the original error for data-less meta tensors.
+                if mask.is_meta:
+                    mask.sum().item()
+                block_area = h * w
+                if block_area == 0:
+                    continue
+                block_bits = (((1 << w) - 1) * row_repeats[h]) << (top * W + left)
+                num_already_masked = bin(mask_bits & block_bits).count("1")
+                num_new_masked = block_area - num_already_masked
                 if 0 < num_new_masked <= max_new_masked:
-                    mask[top : top + h, left : left + w] = 1
+                    mask_bits |= block_bits
                     delta += num_new_masked
             if delta > 0:
                 break
@@ -1052,7 +1065,15 @@ def random_block_mask_image(
             break
         else:
             mask_count += delta
-    return mask
+    if mask_count == 0:
+        return mask
+    # Unpack the row-major bits and copy them to the requested device.
+    num_patches = H * W
+    bits = np.unpackbits(
+        np.frombuffer(mask_bits.to_bytes((num_patches + 7) // 8, "little"), np.uint8),
+        bitorder="little",
+    )
+    return mask.copy_(torch.from_numpy(bits[:num_patches].reshape(H, W)))
 
 
 def nearest_neighbors(
